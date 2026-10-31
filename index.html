@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Mundo Viajero</title>
+  <meta name="description" content="Mapa del mundo interactivo en 3D: selecciona un país y descubre su información turística, imprescindibles y cómo llegar desde tu ciudad.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌍</text></svg>">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div id="globe" aria-label="Globo terráqueo interactivo"></div>
+
+  <!-- Barra superior -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-logo">🌍</span>
+      <div>
+        <h1>Mundo Viajero</h1>
+        <p>Explora el globo y planifica tu viaje</p>
+      </div>
+    </div>
+
+    <div class="search">
+      <input id="search" type="search" placeholder="Buscar país… (p. ej. Japón)" autocomplete="off" aria-label="Buscar país">
+      <ul id="search-results" class="dropdown" role="listbox" hidden></ul>
+    </div>
+
+    <button id="origin-btn" class="chip" title="Cambiar ciudad de origen">
+      <span class="chip-icon">📍</span>
+      <span class="chip-text">Desde <strong id="origin-name">…</strong></span>
+    </button>
+  </header>
+
+  <!-- Selector de origen -->
+  <div id="origin-modal" class="modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="origin-title">
+      <div class="modal-head">
+        <h2 id="origin-title">¿Desde dónde viajas?</h2>
+        <button class="icon-btn" data-close aria-label="Cerrar">✕</button>
+      </div>
+      <button id="geo-btn" class="btn btn-primary btn-block">📡 Usar mi ubicación actual</button>
+      <p id="geo-status" class="muted small"></p>
+      <input id="origin-search" type="search" placeholder="Busca tu ciudad o aeropuerto (BCN, Madrid…)" autocomplete="off">
+      <ul id="origin-list" class="origin-list"></ul>
+    </div>
+  </div>
+
+  <!-- Panel del país -->
+  <aside id="panel" class="panel" aria-live="polite" hidden>
+    <button id="panel-close" class="icon-btn panel-close" aria-label="Cerrar panel">✕</button>
+    <div class="panel-grip" aria-hidden="true"></div>
+    <div id="panel-content"></div>
+  </aside>
+
+  <!-- Controles del mapa -->
+  <div class="map-controls">
+    <div class="segmented" role="group" aria-label="Estilo del mapa">
+      <button data-style="sat" class="active" title="Imágenes de satélite en alta resolución">Satélite</button>
+      <button data-style="map" title="Mapa de calles">Mapa</button>
+      <button data-style="classic" title="Globo clásico (sin conexión)">Clásico</button>
+    </div>
+    <div class="zoom-btns">
+      <button id="zoom-in" class="icon-btn" aria-label="Acercar">＋</button>
+      <button id="zoom-out" class="icon-btn" aria-label="Alejar">－</button>
+      <button id="zoom-home" class="icon-btn" aria-label="Vista global" title="Vista global">⌂</button>
+    </div>
+  </div>
+
+  <div id="hint" class="hint">Arrastra para girar · Rueda o pellizca para hacer zoom · Haz clic en un país</div>
+  <div id="attribution" class="attribution"></div>
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="vendor/globe.gl.min.js"></script>
+  <script src="js/data/airports.js"></script>
+  <script src="js/data/tourism.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
