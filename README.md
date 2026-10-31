@@ -9,6 +9,11 @@ sus imprescindibles y **cómo llegar desde tu ciudad**, con enlaces directos a b
 
 - **Globo 3D con imágenes de satélite** que ganan detalle al hacer zoom (teselas de Esri World Imagery),
   además de un modo *Mapa* (CARTO Voyager sobre OpenStreetMap, nítido en pantallas Retina) y un modo *Clásico* que funciona sin conexión.
+- **Etiquetas como en Google Earth**: más de 5.000 ciudades con su nombre en español que aparecen según el zoom
+  (capitales marcadas con un rombo), nombres de países y límites de regiones/provincias al acercarte.
+  Las etiquetas se colocan sin solaparse.
+- **Google Earth y Street View**: cada país y cada lugar imprescindible tienen un botón para abrirlo en Google Earth (3D)
+  y en Street View.
 - **Selección de países** con clic, buscador (atajo `/`) o enlace directo (`index.html#JP`).
   Al acercarte aparecen los nombres de los países y un botón para abrir la guía del país que tienes en el centro.
 - **Ficha del país**:
@@ -37,7 +42,8 @@ sus imprescindibles y **cómo llegar desde tu ciudad**, con enlaces directos a b
 | Aeropuertos de llegada y ciudades de origen | `js/data/airports.js` |
 | Aeropuertos de salida de todo el mundo | `data/airports-world.json` (OurAirports, dominio público) |
 | Tu ubicación | Geolocalización del navegador · BigDataCloud (nombre de la ciudad) · GeoJS / ipapi (ubicación aproximada por IP) |
-| Fronteras | Natural Earth 1:50m |
+| Fronteras de países | Natural Earth 1:50m |
+| Ciudades y límites de regiones | Natural Earth 1:10m (`data/cities.json`, `data/regions.json`) |
 
 > Las duraciones de vuelo son estimaciones para un vuelo directo. Los precios, horarios y requisitos de entrada
 > reales deben consultarse siempre en los buscadores y fuentes oficiales enlazadas.
@@ -54,6 +60,17 @@ python3 -m http.server 8000
 
 También se puede publicar tal cual en GitHub Pages, Netlify, Vercel, etc.
 
+## Tests
+
+Hay una batería de tests de extremo a extremo que abre la web en Chromium, simula las APIs externas y la ubicación,
+y comprueba: carga del globo, rendimiento, detección de ubicación, etiquetas sin solapes, fronteras regionales,
+selección por clic, buscador, rutas y enlaces de vuelos, Google Earth, modos de mapa, vista móvil y ausencia de errores.
+
+```bash
+npm i -D playwright && npx playwright install chromium
+node tests/e2e.mjs
+```
+
 ## Estructura
 
 ```
@@ -63,6 +80,10 @@ js/app.js             Lógica del globo, panel, rutas y llamadas a APIs
 js/data/tourism.js    Guías turísticas curadas
 js/data/airports.js   Aeropuerto principal por país y ciudades de origen
 data/countries.geojson Fronteras de países (Natural Earth, simplificado)
+data/cities.json      Ciudades con nombre en español (Natural Earth)
+data/regions.json     Límites de regiones/provincias (Natural Earth, simplificado)
+data/airports-world.json Aeropuertos internacionales (OurAirports)
+tests/e2e.mjs         Tests de extremo a extremo
 vendor/globe.gl.min.js globe.gl 2.46.2 (Three.js)
 assets/               Texturas de la Tierra y del cielo
 ```

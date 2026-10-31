@@ -204,8 +204,9 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     });
     const geo = new BufferGeometry();
     geo.setAttribute("position", new Float32BufferAttribute(pos, 3));
-    const mat = new LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.45 });
+    const mat = new LineBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0.6 });
     state.borders = new LineSegments(geo, mat);
+    state.borders.raycast = () => {}; // las líneas no deben "robar" el clic al país que hay debajo
     state.borders.visible = STYLES[state.style || "sat"].overlays;
     globe.customLayerData([{ obj: state.borders }]);
   }
@@ -253,7 +254,9 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     });
     // la capa de teselas se crea de forma asíncrona al iniciar el globo: reintentamos si aún no existe
     if (!found && tries < 20) return setTimeout(() => applyTileDetail(factor, tries + 1), 150);
-    globe.pointOfView(globe.pointOfView(), 0); // fuerza a recalcular el nivel de teselas
+    // fuerza a recalcular y pedir las teselas aunque la cámara esté quieta (un cambio mínimo de altitud)
+    const pov = globe.pointOfView();
+    globe.pointOfView({ ...pov, altitude: pov.altitude * 1.0001 }, 0);
   }
 
   function setStyle(key) {
@@ -262,8 +265,7 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     globe.globeTileEngineUrl(s.url);
     applyTileDetail(s.detail);
     if (state.borders) state.borders.visible = s.overlays;
-    if (!s.overlays && state.labelsOn) { state.labelsOn = false; updateHtmlLayer(); }
-    else afterZoom(globe.pointOfView());
+    afterZoom(globe.pointOfView());
     $("#attribution").innerHTML = s.attr + " · Datos: Wikipedia, Wikidata, REST Countries";
     $$(".segmented button").forEach((b) => b.classList.toggle("active", b.dataset.style === key));
     try { localStorage.setItem("mv-style", key); } catch (_) { /* ignorar */ }
@@ -313,19 +315,20 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
       .pin-place i{font-style:normal;font-size:12px;color:#fff;background:rgba(10,14,26,.85);padding:3px 8px;border-radius:8px;white-space:nowrap;opacity:0;transition:opacity .2s;pointer-events:none}
       .pin-place:hover i,.pin-place.active i{opacity:1}
       .pin-place.active b,.pin-place:hover b{transform:scale(1.25)}
-      .pin-country{transform:translate(-50%,-50%);font-size:12px;font-weight:600;color:rgba(255,255,255,.92);text-shadow:0 1px 3px #000,0 0 8px #000;white-space:nowrap;letter-spacing:.3px}`;
+      .pin-country{transform:translate(-50%,-50%);font-size:12.5px;font-weight:700;color:#ffe9a8;text-shadow:0 1px 3px #000,0 0 8px #000;white-space:nowrap;letter-spacing:.8px;text-transform:uppercase}
+      .pin-city{transform:translate(-4px,-50%);display:flex;align-items:center;gap:5px;font-size:12px;font-weight:500;color:#fff;text-shadow:0 1px 2px #000,0 0 6px #000;white-space:nowrap}
+      .pin-city i{width:6px;height:6px;border-radius:50%;background:#fff;box-shadow:0 0 0 1.5px rgba(0,0,0,.7);flex:none}
+      .pin-city.capital{font-weight:700}
+      .pin-city.capital i{width:8px;height:8px;background:#ffb547;border-radius:1px;transform:rotate(45deg)}`;
     const st = document.createElement("style");
     st.textContent = css;
     document.head.appendChild(st);
   }
 
   function updateHtmlLayer() {
-    const items = [];
-    if (state.origin) {
-      items.push({ lat: state.origin.lat, lng: state.origin.lng, alt: 0.012, el: state.originEl });
-    }
+    const items = (state.mapLabels || []).slice();
     state.places.forEach((p) => p.el && items.push({ lat: p.lat, lng: p.lng, alt: 0.012, el: p.el }));
-    if (state.labelsOn) state.countryLabels.forEach((c) => c.visible && items.push(c));
+    if (state.origin) items.push({ lat: state.origin.lat, lng: state.origin.lng, alt: 0.012, el: state.originEl });
     globe.htmlElementsData(items);
   }
 
@@ -333,7 +336,8 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     globe.ringsData(state.origin ? [{ lat: state.origin.lat, lng: state.origin.lng }] : []);
   }
 
-  // Etiquetas de países visibles al hacer zoom
+  // ---------------------------------------------------------------- etiquetas del mapa (países y ciudades)
+  // Como en Google Earth: al acercarte aparecen más ciudades; se descartan las que se solaparían en pantalla.
   function buildCountryLabels() {
     const seen = new Set();
     state.countryLabels = [];
@@ -341,11 +345,103 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
       const p = f.properties;
       if (seen.has(p.iso) || p.lx == null) return;
       seen.add(p.iso);
+      const main = state.byIso.get(p.iso) || f;
+      const [minX, minY, maxX, maxY] = main.bbox;
       state.countryLabels.push({
-        iso: p.iso, lat: p.ly, lng: p.lx, alt: 0.008, visible: false,
-        el: makePin("pin-country", esc(p.label))
+        kind: "country", iso: p.iso, name: p.label, lat: p.ly, lng: p.lx, alt: 0.008,
+        size: Math.min(Math.abs(maxX - minX), 60) * Math.abs(maxY - minY), el: null
       });
     });
+  }
+
+  async function loadCities() {
+    if (state.cities) return state.cities;
+    const raw = await (await fetch("data/cities.json")).json();
+    state.cities = raw.map(([name, lat, lng, pop, rank, cap, iso]) => ({ kind: "city", name, lat, lng, pop, rank, cap, iso, alt: 0.004, el: null }));
+    return state.cities;
+  }
+
+  function labelEl(item) {
+    if (item.el) return item.el;
+    if (item.kind === "country") item.el = makePin("pin-country", esc(item.name));
+    else item.el = makePin(`pin-city${item.cap === 2 ? " capital" : ""}`, `<i></i><span>${esc(item.name)}</span>`);
+    item.el.dataset.label = item.name;
+    return item.el;
+  }
+
+  function computeLabels(pov) {
+    const alt = pov.altitude;
+    if (!STYLES[state.style || "sat"].overlays || alt > 1.8 || !state.countryLabels) return [];
+    const horizon = Math.acos(1 / (1 + alt)) * 180 / Math.PI; // ángulo visible desde el centro de la vista
+    const maxDeg = Math.min(horizon * 0.9, 80);
+    const minPop = alt > 1.2 ? 8e6 : alt > 0.8 ? 2e6 : alt > 0.5 ? 7e5 : alt > 0.3 ? 2.5e5 : alt > 0.15 ? 1e5 : alt > 0.07 ? 3e4 : 0;
+    const cands = [];
+    if (alt > 0.12) {
+      state.countryLabels.forEach((c) => {
+        if (c.iso === state.selected && alt < 0.5) return;
+        // de lejos mandan los países; de cerca, las ciudades grandes
+        cands.push([c, (alt > 0.45 ? 1e10 : 3e5) + c.size * 1e3]);
+      });
+    }
+    (state.cities || []).forEach((c) => {
+      const isCap = c.cap === 2;
+      if (c.pop < minPop && !(isCap && alt < 1.3)) return;
+      cands.push([c, c.pop + (isCap ? 2e7 : 0) + (c.cap === 1 ? 2e5 : 0)]);
+    });
+    const vis = cands.filter(([c]) => haversine(pov.lat, pov.lng, c.lat, c.lng) / 111.2 < maxDeg);
+    vis.sort((a, b) => b[1] - a[1]);
+
+    const W = window.innerWidth, H = window.innerHeight;
+    const panel = $("#panel").hidden ? null : $("#panel").getBoundingClientRect();
+    const boxes = [], out = [];
+    const MAX = isMobile() ? 35 : 75;
+    for (const [c] of vis) {
+      if (out.length >= MAX) break;
+      const sc = globe.getScreenCoords(c.lat, c.lng, c.alt);
+      if (!sc || !Number.isFinite(sc.x)) continue;
+      const w = c.name.length * (c.kind === "country" ? 7.2 : 6.6) + (c.kind === "country" ? 8 : 16);
+      const h = c.kind === "country" ? 18 : 16;
+      const box = c.kind === "country" ? [sc.x - w / 2, sc.y - h / 2, sc.x + w / 2, sc.y + h / 2] : [sc.x - 5, sc.y - h / 2, sc.x + w, sc.y + h / 2];
+      if (box[2] < 0 || box[0] > W || box[3] < 0 || box[1] > H) continue;
+      if (panel && box[0] < panel.right && box[2] > panel.left && box[1] < panel.bottom && box[3] > panel.top) continue;
+      if (boxes.some((b) => box[0] < b[2] + 4 && box[2] + 4 > b[0] && box[1] < b[3] + 2 && box[3] + 2 > b[1])) continue;
+      boxes.push(box);
+      labelEl(c);
+      out.push(c);
+    }
+    return out;
+  }
+
+  // Fronteras de regiones / provincias (se cargan al acercarse)
+  async function loadRegions() {
+    if (state.regionsLoading) return;
+    state.regionsLoading = true;
+    try {
+      const lines = await (await fetch("data/regions.json")).json();
+      const R = globe.getGlobeRadius() * 1.0012;
+      const pos = [];
+      const toXYZ = (lng, lat) => {
+        const phi = (90 - lat) * Math.PI / 180, theta = (90 - lng) * Math.PI / 180;
+        return [R * Math.sin(phi) * Math.cos(theta), R * Math.cos(phi), R * Math.sin(phi) * Math.sin(theta)];
+      };
+      lines.forEach((l) => {
+        let prev = toXYZ(l[0], l[1]);
+        for (let i = 2; i < l.length; i += 2) {
+          const cur = toXYZ(l[i], l[i + 1]);
+          pos.push(...prev, ...cur);
+          prev = cur;
+        }
+      });
+      const geo = new BufferGeometry();
+      geo.setAttribute("position", new Float32BufferAttribute(pos, 3));
+      state.regions = new LineSegments(geo, new LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.28 }));
+      state.regions.visible = false;
+      state.regions.raycast = () => {};
+      globe.customLayerData([{ obj: state.borders }, { obj: state.regions }]);
+      afterZoom(globe.pointOfView());
+    } catch (e) {
+      state.regionsLoading = false;
+    }
   }
 
   let zoomTimer = null;
@@ -363,18 +459,17 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
       state.arcStroke = stroke;
       globe.arcStroke(stroke);
     }
-    // Etiquetas de países sólo cuando estamos cerca
-    const show = pov.altitude < 1.25 && STYLES[state.style || "sat"].overlays && !!state.countryLabels;
-    if (show) {
-      const radius = 18 + pov.altitude * 45; // grados alrededor del centro de la vista
-      state.countryLabels.forEach((c) => {
-        c.visible = haversine(pov.lat, pov.lng, c.lat, c.lng) / 111 < radius && c.iso !== state.selected;
-      });
-    }
-    if (show || state.labelsOn) {
-      state.labelsOn = show;
+    // Etiquetas de países y ciudades
+    const labels = computeLabels(pov);
+    const prev = state.mapLabels || [];
+    if (labels.length !== prev.length || labels.some((l, i) => l !== prev[i])) {
+      state.mapLabels = labels;
       updateHtmlLayer();
     }
+    // Fronteras de regiones al acercarse
+    const overlays = STYLES[state.style || "sat"].overlays;
+    if (pov.altitude < 1.0 && overlays && !state.regions) loadRegions();
+    if (state.regions) state.regions.visible = overlays && pov.altitude < 1.0;
     // País bajo el centro de la vista → botón de acceso rápido
     const cBtn = $("#center-btn");
     if (pov.altitude < 0.9) {
@@ -730,6 +825,7 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
           <div class="flag">${flag(iso)}</div>
           <h2>${esc(name)}</h2>
           <div class="sub" id="hero-sub">${esc(contEs)}</div>
+          ${countryEarthUrl(iso, name) ? `<a class="hero-earth" href="${countryEarthUrl(iso, name)}" target="_blank" rel="noopener">🌍 Ver ${esc(name)} en Google Earth</a>` : ""}
         </div>
       </div>
 
@@ -771,6 +867,18 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     loadDynamic(iso, name);
   }
 
+  // Enlaces a Google Earth (vista 3D) y Street View
+  const earthUrl = (lat, lng, distM, name, tilt = 55) =>
+    `https://earth.google.com/web/search/${encodeURIComponent(name || "")}/@${(+lat).toFixed(5)},${(+lng).toFixed(5)},0a,${Math.round(distM)}d,35y,0h,${tilt}t,0r`;
+  const streetViewUrl = (lat, lng) => `https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${(+lat).toFixed(5)},${(+lng).toFixed(5)}`;
+  function countryEarthUrl(iso, name) {
+    const f = state.byIso.get(iso);
+    if (!f) return null;
+    const [minX, minY, maxX, maxY] = f.bbox;
+    const span = Math.max(Math.min(maxX - minX, 60), maxY - minY);
+    return earthUrl(f.properties.ly, f.properties.lx, clamp(span * 111000 * 2.2, 60000, 9000000), name, 0);
+  }
+
   function renderPlaces(list, countryName, target = "#places") {
     $(target).innerHTML = list
       .map((p) => {
@@ -785,7 +893,9 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
             ${p.desc ? `<div class="d">${esc(p.desc)}</div>` : ""}
             <div class="acts">
               ${Number.isFinite(p.lat) ? `<a href="#" data-fly="${p.n}">🔭 Ver en el globo</a>` : ""}
+              ${Number.isFinite(p.lat) ? `<a href="${earthUrl(p.lat, p.lng, 1500, p.name)}" target="_blank" rel="noopener" data-earth>🌍 Google Earth</a>` : ""}
               <a href="${maps}" target="_blank" rel="noopener">🗺️ Google Maps</a>
+              ${Number.isFinite(p.lat) ? `<a href="${streetViewUrl(p.lat, p.lng)}" target="_blank" rel="noopener">🚶 Street View</a>` : ""}
               ${p.wiki ? `<a href="${esc(p.wiki)}" target="_blank" rel="noopener">📖 Wikipedia</a>` : ""}
             </div>
           </div>
@@ -938,10 +1048,12 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     }
     const fromSpain = state.origin && state.origin.iso === "ES";
     const wv = `https://es.wikivoyage.org/wiki/${encodeURIComponent(name.replace(/ /g, "_"))}`;
+    const ge = countryEarthUrl(iso, name);
     $("#tips").innerHTML = `
       <ul class="tips">${tips.map((x) => `<li>${x}</li>`).join("")}</ul>
       <div class="extra-links">
         ${fromSpain ? `<a class="btn" href="https://www.exteriores.gob.es/es/ServiciosAlCiudadano/Paginas/Recomendaciones-de-viaje.aspx" target="_blank" rel="noopener">🇪🇸 Recomendaciones de viaje (Exteriores)</a>` : ""}
+        ${ge ? `<a class="btn" href="${ge}" target="_blank" rel="noopener" data-earth-country>🌍 Explorar en Google Earth</a>` : ""}
         <a class="btn" href="${wv}" target="_blank" rel="noopener">🧳 Guía en Wikivoyage</a>
         <a class="btn" href="https://www.google.com/maps/search/${encodeURIComponent("atracciones turísticas en " + name)}" target="_blank" rel="noopener">📍 Qué ver (Google Maps)</a>
       </div>`;
@@ -1245,6 +1357,7 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
 
     bindEvents();
     await loadCountries();
+    loadCities().then(() => afterZoom(globe.pointOfView())).catch(() => {});
 
     // Si la persona no ha elegido su ciudad a mano, detectamos su ubicación en cada visita
     if (!savedOk || saved.source !== "manual") {
