@@ -8,7 +8,7 @@ sus imprescindibles y **cómo llegar desde tu ciudad**, con enlaces directos a b
 ## Funcionalidades
 
 - **Globo 3D con imágenes de satélite** que ganan detalle al hacer zoom (teselas de Esri World Imagery),
-  además de un modo *Mapa* (OpenStreetMap) y un modo *Clásico* que funciona sin conexión.
+  además de un modo *Mapa* (CARTO Voyager sobre OpenStreetMap, nítido en pantallas Retina) y un modo *Clásico* que funciona sin conexión.
 - **Selección de países** con clic, buscador (atajo `/`) o enlace directo (`index.html#JP`).
   Al acercarte aparecen los nombres de los países y un botón para abrir la guía del país que tienes en el centro.
 - **Ficha del país**:
@@ -20,8 +20,10 @@ sus imprescindibles y **cómo llegar desde tu ciudad**, con enlaces directos a b
     La ruta se dibuja en el globo como un arco animado.
   - ⭐ **Imprescindibles**: 5–10 lugares famosos con marcadores numerados en el globo; pulsa uno para volar hasta él.
   - 💡 Recomendaciones: mejor época, consejos prácticos y enlaces a Wikivoyage y a las recomendaciones de viaje del Ministerio de Exteriores (si viajas desde España).
-- **Origen automático**: la app intenta detectar tu ubicación (con tu permiso) y usa el aeropuerto importante más cercano.
-  Si no, usa **Barcelona** por defecto. Puedes cambiarlo en cualquier momento con el botón «📍 Desde…».
+- **Detecta dónde estás**: en cada visita usa la ubicación del navegador (con tu permiso) o, si no la das,
+  una ubicación aproximada por tu conexión. Busca el aeropuerto internacional más cercano entre ~1.150 de todo el mundo
+  y te propone alternativas cercanas (p. ej. Girona, Barcelona o Reus). Si eliges una ciudad a mano con «📍 Desde…»,
+  se respeta esa elección. Si no se puede detectar nada, usa **Barcelona**.
 - Diseño adaptado a móvil (panel inferior deslizable).
 
 ## Fuentes de información
@@ -33,6 +35,8 @@ sus imprescindibles y **cómo llegar desde tu ciudad**, con enlaces directos a b
 | Resúmenes | Wikipedia en español |
 | Datos del país | REST Countries |
 | Aeropuertos de llegada y ciudades de origen | `js/data/airports.js` |
+| Aeropuertos de salida de todo el mundo | `data/airports-world.json` (OurAirports, dominio público) |
+| Tu ubicación | Geolocalización del navegador · BigDataCloud (nombre de la ciudad) · GeoJS / ipapi (ubicación aproximada por IP) |
 | Fronteras | Natural Earth 1:50m |
 
 > Las duraciones de vuelo son estimaciones para un vuelo directo. Los precios, horarios y requisitos de entrada

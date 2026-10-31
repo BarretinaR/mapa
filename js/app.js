@@ -111,16 +111,22 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
   };
 
   // ---------------------------------------------------------------- globo
+  const RETINA = (window.devicePixelRatio || 1) >= 1.5;
   const STYLES = {
     sat: {
       url: (x, y, l) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${l}/${y}/${x}`,
-      attr: 'Imágenes © <a href="https://www.esri.com" target="_blank" rel="noopener">Esri</a>, Maxar, Earthstar Geographics'
+      attr: 'Imágenes © <a href="https://www.esri.com" target="_blank" rel="noopener">Esri</a>, Maxar, Earthstar Geographics',
+      detail: 2, // un nivel más de detalle que el predeterminado
+      overlays: true
     },
     map: {
-      url: (x, y, l) => `https://tile.openstreetmap.org/${l}/${x}/${y}.png`,
-      attr: '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>'
+      // CARTO Voyager: mapa limpio y legible, con teselas @2x en pantallas Retina
+      url: (x, y, l) => `https://${"abcd"[(x + y) % 4]}.basemaps.cartocdn.com/rastertiles/voyager/${l}/${x}/${y}${RETINA ? "@2x" : ""}.png`,
+      attr: '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> · © <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>',
+      detail: 2,
+      overlays: false // el propio mapa ya trae fronteras y nombres
     },
-    classic: { url: null, attr: "NASA Blue Marble · Natural Earth" }
+    classic: { url: null, attr: "NASA Blue Marble · Natural Earth", detail: 1, overlays: true }
   };
 
   const globe = new Globe($("#globe"), { rendererConfig: { antialias: true, logarithmicDepthBuffer: true } })
@@ -199,7 +205,9 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     const geo = new BufferGeometry();
     geo.setAttribute("position", new Float32BufferAttribute(pos, 3));
     const mat = new LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.45 });
-    globe.customLayerData([{ obj: new LineSegments(geo, mat) }]);
+    state.borders = new LineSegments(geo, mat);
+    state.borders.visible = STYLES[state.style || "sat"].overlays;
+    globe.customLayerData([{ obj: state.borders }]);
   }
 
   // Detección del país bajo el puntero (más ligera que hacer raycasting contra cientos de polígonos)
@@ -232,9 +240,30 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     $("#hint").classList.add("hide");
   });
 
+  // Las teselas que elige globe.gl por defecto son de poco detalle (se ven borrosas, sobre todo en Retina).
+  // Multiplicamos los umbrales de distancia para cargar uno o dos niveles más de detalle.
+  function applyTileDetail(factor, tries = 0) {
+    let found = false;
+    globe.scene().traverse((o) => {
+      if (Array.isArray(o.thresholds) && "minLevel" in o) {
+        if (!o._baseThresholds) o._baseThresholds = o.thresholds.slice();
+        o.thresholds = o._baseThresholds.map((t) => t * factor);
+        found = true;
+      }
+    });
+    // la capa de teselas se crea de forma asíncrona al iniciar el globo: reintentamos si aún no existe
+    if (!found && tries < 20) return setTimeout(() => applyTileDetail(factor, tries + 1), 150);
+    globe.pointOfView(globe.pointOfView(), 0); // fuerza a recalcular el nivel de teselas
+  }
+
   function setStyle(key) {
     const s = STYLES[key];
+    state.style = key;
     globe.globeTileEngineUrl(s.url);
+    applyTileDetail(s.detail);
+    if (state.borders) state.borders.visible = s.overlays;
+    if (!s.overlays && state.labelsOn) { state.labelsOn = false; updateHtmlLayer(); }
+    else afterZoom(globe.pointOfView());
     $("#attribution").innerHTML = s.attr + " · Datos: Wikipedia, Wikidata, REST Countries";
     $$(".segmented button").forEach((b) => b.classList.toggle("active", b.dataset.style === key));
     try { localStorage.setItem("mv-style", key); } catch (_) { /* ignorar */ }
@@ -335,7 +364,7 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
       globe.arcStroke(stroke);
     }
     // Etiquetas de países sólo cuando estamos cerca
-    const show = pov.altitude < 1.25;
+    const show = pov.altitude < 1.25 && STYLES[state.style || "sat"].overlays && !!state.countryLabels;
     if (show) {
       const radius = 18 + pov.altitude * 45; // grados alrededor del centro de la vista
       state.countryLabels.forEach((c) => {
@@ -412,68 +441,175 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
   }
 
   // ---------------------------------------------------------------- origen
-  function setOrigin(o, { silent = false, custom = null } = {}) {
-    state.origin = { ...o, label: custom || o.name };
-    $("#origin-name").textContent = state.origin.label;
-    state.originEl = makePin("pin-origin", `<span>${esc(o.iata)}</span>📍`);
-    try { localStorage.setItem("mv-origin", JSON.stringify({ iata: o.iata, name: o.name, custom })); } catch (_) { /* ignorar */ }
+  // El origen guarda dónde está la persona (lat/lng, ciudad) y el aeropuerto desde el que volaría (iata, apLat/apLng).
+  const BROWSER_TZ = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (_) { return null; } })();
+  let WORLD_AP = null;
+  async function loadWorldAirports() {
+    if (!WORLD_AP) {
+      const raw = await (await fetch("data/airports-world.json")).json();
+      WORLD_AP = raw.map(([iata, name, city, lat, lng, iso]) => ({ iata, name, city, lat, lng, iso }));
+    }
+    return WORLD_AP;
+  }
+  function airportsNear(lat, lng, n = 4) {
+    return (WORLD_AP || [])
+      .map((a) => ({ ...a, dist: haversine(lat, lng, a.lat, a.lng) }))
+      .sort((a, b) => a.dist - b.dist)
+      .slice(0, n);
+  }
+  const tzForCountry = (iso) => (ORIGINS.find((o) => o.iso === iso) || {}).tz || null;
+
+  // Origen a partir de una de las ciudades populares de la lista
+  function originFromCity(o) {
+    return { name: o.name, lat: o.lat, lng: o.lng, iso: o.iso, tz: o.tz, iata: o.iata, apName: null, apLat: o.lat, apLng: o.lng, apDist: 0, source: "manual" };
+  }
+  // Origen a partir de un aeropuerto de la base mundial
+  function originFromAirport(a, source = "manual") {
+    return { name: a.city || a.name, lat: a.lat, lng: a.lng, iso: a.iso, tz: tzForCountry(a.iso), iata: a.iata, apName: a.name, apLat: a.lat, apLng: a.lng, apDist: 0, source };
+  }
+  // Origen a partir de la ubicación real de la persona
+  function originFromPosition({ lat, lng, city, iso, source }) {
+    const near = airportsNear(lat, lng, 4);
+    const ap = near[0];
+    return {
+      name: city || (ap && ap.city) || "Tu ubicación",
+      lat, lng,
+      iso: iso || (ap && ap.iso),
+      tz: BROWSER_TZ || tzForCountry(iso || (ap && ap.iso)),
+      iata: ap.iata, apName: ap.name, apLat: ap.lat, apLng: ap.lng, apDist: ap.dist,
+      nearby: near.filter((a) => a.dist < 300).map(({ iata, name, city, lat, lng, dist }) => ({ iata, name, city, lat, lng, dist })),
+      source
+    };
+  }
+
+  function setOrigin(o, { silent = false } = {}) {
+    state.origin = { ...o, label: o.name };
+    $("#origin-name").textContent = o.name;
+    state.originEl = makePin("pin-origin", `<span>${esc(o.source === "gps" || o.source === "ip" ? "Tú · " + o.iata : o.iata)}</span>📍`);
+    try { localStorage.setItem("mv-origin2", JSON.stringify(o)); } catch (_) { /* ignorar */ }
     updateRings();
     updateHtmlLayer();
     if (state.selected) {
       renderRoute();
       drawArc();
     }
-    if (!silent) toast(`📍 Origen: <b>${esc(state.origin.label)}</b> (${esc(o.iata)})`);
-  }
-
-  function nearestOrigin(lat, lng) {
-    let best = null, bd = Infinity;
-    ORIGINS.forEach((o) => {
-      const d = haversine(lat, lng, o.lat, o.lng);
-      if (d < bd) { bd = d; best = o; }
-    });
-    return { origin: best, dist: bd };
-  }
-
-  function detectLocation(manual) {
-    const status = $("#geo-status");
-    if (!("geolocation" in navigator)) {
-      if (manual) status.textContent = "Tu navegador no permite la geolocalización.";
-      return;
+    if (!silent) {
+      const where = o.source === "gps" ? "Te hemos localizado en" : o.source === "ip" ? "Ubicación aproximada:" : "Origen:";
+      const ap = o.apDist > 3 ? ` · aeropuerto ${esc(o.iata)} a ${nf.format(Math.round(o.apDist))} km` : ` (${esc(o.iata)})`;
+      toast(`📍 ${where} <b>${esc(o.name)}</b>${ap}`);
     }
-    if (manual) status.textContent = "Buscando tu ubicación…";
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const { latitude, longitude } = pos.coords;
-        const { origin, dist } = nearestOrigin(latitude, longitude);
-        const custom = dist > 60 ? `${origin.name} (aeropuerto más cercano)` : null;
-        setOrigin(origin, { custom });
-        if (manual) {
-          status.textContent = `Ubicación detectada: aeropuerto de referencia ${origin.name} (${origin.iata}), a ${nf.format(Math.round(dist))} km.`;
-          setTimeout(closeOriginModal, 900);
-        }
-      },
-      (err) => {
-        if (manual) status.textContent = "No se pudo obtener tu ubicación (" + (err.code === 1 ? "permiso denegado" : "no disponible") + "). Elige tu ciudad en la lista.";
-      },
-      { enableHighAccuracy: false, timeout: 10000, maximumAge: 3600000 }
-    );
+  }
+
+  // Cambia sólo el aeropuerto de salida, manteniendo la ubicación de la persona
+  function setDepartureAirport(iata) {
+    const o = state.origin;
+    const a = (o.nearby || []).find((x) => x.iata === iata) || (WORLD_AP || []).find((x) => x.iata === iata);
+    if (!a) return;
+    setOrigin({ ...o, iata: a.iata, apName: a.name, apLat: a.lat, apLng: a.lng, apDist: haversine(o.lat, o.lng, a.lat, a.lng) }, { silent: true });
+  }
+
+  async function reverseGeocode(lat, lng, signal) {
+    try {
+      const r = await fetchJSON(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=es`, signal, 6000);
+      return { city: r.city || r.locality || r.principalSubdivision || null, iso: r.countryCode || null };
+    } catch (_) {
+      return { city: null, iso: null };
+    }
+  }
+
+  async function ipLocation() {
+    try {
+      const r = await fetchJSON("https://get.geojs.io/v1/ip/geo.json", null, 6000);
+      if (r.latitude && r.longitude) return { lat: +r.latitude, lng: +r.longitude, city: r.city || null, iso: r.country_code || null };
+    } catch (_) { /* probamos otro servicio */ }
+    try {
+      const r = await fetchJSON("https://ipapi.co/json/", null, 6000);
+      if (r.latitude && r.longitude) return { lat: +r.latitude, lng: +r.longitude, city: r.city || null, iso: r.country_code || null };
+    } catch (_) { /* sin ubicación por IP */ }
+    return null;
+  }
+
+  function gpsLocation() {
+    return new Promise((resolve, reject) => {
+      if (!("geolocation" in navigator)) return reject(new Error("no soportado"));
+      navigator.geolocation.getCurrentPosition(
+        (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+        (err) => reject(err),
+        { enableHighAccuracy: false, timeout: 12000, maximumAge: 600000 }
+      );
+    });
+  }
+
+  // Detecta dónde está la persona: GPS del navegador (preciso, pide permiso) y, como respaldo, su IP (aproximado).
+  async function detectLocation({ manual = false } = {}) {
+    const status = $("#geo-status");
+    const say = (t) => { if (manual) status.textContent = t; };
+    say("Buscando tu ubicación…");
+    await loadWorldAirports();
+    const prev = state.origin;
+    let gotGps = false;
+
+    const apply = async (pos, source) => {
+      let { city, iso } = pos;
+      if (source === "gps") {
+        const g = await reverseGeocode(pos.lat, pos.lng);
+        city = g.city || city;
+        iso = g.iso || iso;
+      }
+      const o = originFromPosition({ lat: pos.lat, lng: pos.lng, city, iso, source });
+      const changed = !prev || prev.iata !== o.iata || prev.name !== o.name || prev.source !== o.source;
+      setOrigin(o, { silent: !manual && !changed });
+      say(`Ubicación ${source === "gps" ? "detectada" : "aproximada (por tu conexión)"}: ${o.name}. Aeropuerto más cercano: ${o.apName} (${o.iata}), a ${nf.format(Math.round(o.apDist))} km.`);
+    };
+
+    // Ubicación aproximada por IP: rápida y sin permisos (no sustituye a una ubicación GPS)
+    const ipP = ipLocation().then((pos) => { if (pos && !gotGps) return apply(pos, "ip"); });
+
+    let perm = "prompt";
+    try { perm = (await navigator.permissions.query({ name: "geolocation" })).state; } catch (_) { /* Safari antiguo */ }
+    if (perm !== "denied" || manual) {
+      try {
+        const pos = await gpsLocation();
+        gotGps = true;
+        await apply(pos, "gps");
+        if (manual) setTimeout(closeOriginModal, 1200);
+        return;
+      } catch (err) {
+        say(err && err.code === 1
+          ? "Has bloqueado el permiso de ubicación. Actívalo en los ajustes del navegador o elige tu ciudad abajo."
+          : "No se pudo obtener la ubicación exacta. Usamos una aproximada; también puedes elegir tu ciudad abajo.");
+      }
+    }
+    await ipP;
   }
 
   function renderOriginList(q = "") {
     const nq = norm(q);
-    const list = ORIGINS.filter((o) => !nq || norm(o.name).includes(nq) || norm(o.iata).includes(nq) || norm(esName(o.iso)).includes(nq));
-    $("#origin-list").innerHTML = list
-      .map((o) => `<li data-iata="${o.iata}" class="${state.origin && state.origin.iata === o.iata ? "selected" : ""}">
-        <span>${flag(o.iso)}</span><span>${esc(o.name)} <span class="muted small">· ${esc(esName(o.iso))}</span></span><span class="code">${o.iata}</span></li>`)
-      .join("") || `<li class="muted">Sin resultados</li>`;
+    const cur = state.origin && state.origin.iata;
+    let html = "";
+    if (!nq && state.origin && state.origin.nearby && state.origin.nearby.length > 1) {
+      html += `<li class="muted small" style="cursor:default">Aeropuertos cerca de ti</li>` + state.origin.nearby
+        .map((a) => `<li data-alt="${a.iata}" class="${a.iata === cur ? "selected" : ""}"><span>🛫</span><span>${esc(a.city || a.name)} <span class="muted small">· ${nf.format(Math.round(a.dist))} km</span></span><span class="code">${a.iata}</span></li>`)
+        .join("") + `<li class="muted small" style="cursor:default">Ciudades populares</li>`;
+    }
+    const pop = ORIGINS.filter((o) => !nq || norm(o.name).includes(nq) || norm(o.iata).includes(nq) || norm(esName(o.iso)).includes(nq));
+    html += pop.map((o) => `<li data-pop="${o.iata}" class="${cur === o.iata ? "selected" : ""}">
+        <span>${flag(o.iso)}</span><span>${esc(o.name)} <span class="muted small">· ${esc(esName(o.iso))}</span></span><span class="code">${o.iata}</span></li>`).join("");
+    if (nq && WORLD_AP) {
+      const seen = new Set(pop.map((o) => o.iata));
+      const aps = WORLD_AP.filter((a) => !seen.has(a.iata) && (norm(a.city).includes(nq) || norm(a.name).includes(nq) || norm(a.iata) === nq || norm(esName(a.iso)).includes(nq))).slice(0, 25);
+      html += aps.map((a) => `<li data-ap="${a.iata}" class="${cur === a.iata ? "selected" : ""}">
+        <span>${flag(a.iso)}</span><span>${esc(a.city || a.name)} <span class="muted small">· ${esc(a.name)}</span></span><span class="code">${a.iata}</span></li>`).join("");
+    }
+    $("#origin-list").innerHTML = html || `<li class="muted">Sin resultados. Prueba con el nombre de la ciudad o el código del aeropuerto.</li>`;
   }
   function openOriginModal() {
     $("#origin-modal").hidden = false;
     $("#geo-status").textContent = "";
     $("#origin-search").value = "";
     renderOriginList();
-    setTimeout(() => $("#origin-search").focus(), 50);
+    loadWorldAirports().catch(() => {});
+    if (!isMobile()) setTimeout(() => $("#origin-search").focus(), 50);
   }
   function closeOriginModal() { $("#origin-modal").hidden = true; }
 
@@ -671,7 +807,7 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
       rome2rio: `https://www.rome2rio.com/es/map/${encodeURIComponent(cleanCity(o.name))}/${encodeURIComponent(city)}`,
       hotels: `https://www.google.com/travel/search?q=${encodeURIComponent("hoteles en " + city)}&hl=es&curr=EUR&checkin=${depart}&checkout=${ret}`,
       booking: `https://www.booking.com/searchresults.es.html?ss=${encodeURIComponent(city)}&checkin=${depart}&checkout=${ret}`,
-      drive: `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(o.name)}&destination=${encodeURIComponent(city)}`,
+      drive: `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(o.source === "gps" ? `${o.lat},${o.lng}` : o.name)}&destination=${encodeURIComponent(city)}`,
       train: `https://www.thetrainline.com/es`
     };
   }
@@ -685,7 +821,9 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
       el.innerHTML = `<p class="muted">Elige tu ciudad de origen para ver cómo llegar.</p>`;
       return;
     }
-    const dist = haversine(o.lat, o.lng, d.lat, d.lng);
+    const apLat = o.apLat ?? o.lat, apLng = o.apLng ?? o.lng;
+    const dist = haversine(apLat, apLng, d.lat, d.lng);
+    const groundDist = haversine(o.lat, o.lng, d.lat, d.lng);
     const hours = dist / 820 + 0.5;
     const sameCountry = o.iso === state.selected;
     const sameAirport = d.iata && d.iata === o.iata;
@@ -698,7 +836,7 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
       html += `
         <div class="route">
           <div class="route-line">
-            <div class="route-end"><div class="code">${esc(o.iata)}</div><div class="city">${esc(o.label)}</div></div>
+            <div class="route-end"><div class="code">${esc(o.iata)}</div><div class="city">${esc(o.apName && o.apDist > 3 ? cleanCity(o.apName).replace(/ (International )?Airport$/i, "") : o.label)}</div></div>
             <div class="route-mid"><span>✈ ${nf.format(Math.round(dist))} km</span></div>
             <div class="route-end"><div class="code">${esc(d.iata)}</div><div class="city">${esc(d.city)}</div></div>
           </div>
@@ -708,6 +846,7 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
             <div id="tz-diff"><b>…</b><small>diferencia horaria</small></div>
           </div>
         </div>
+        ${departureNote(o)}
         <div class="dates">
           <label>Ida<input type="date" id="date-dep" value="${state.depart}" min="${isoDate(new Date())}"></label>
           <label>Vuelta<input type="date" id="date-ret" value="${state.ret}" min="${state.depart}"></label>
@@ -726,11 +865,11 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
       html += `<p class="muted">No tenemos un aeropuerto de referencia para ${esc(name)}.</p>`;
     }
 
-    if (sameCountry || sameAirport || dist < 1300) {
+    if (sameCountry || sameAirport || groundDist < 1300) {
       const lk = links || flightLinks(o, { iata: o.iata, city: d.city }, state.depart, state.ret);
       html += `
         <div class="ground">
-          ${sameCountry ? `🏠 Estás viajando dentro de ${esc(name)}.` : sameAirport ? `🚗 ${esc(name)} no tiene aeropuerto propio cercano: se llega por carretera desde ${esc(o.label)}.` : `🚆 ${esc(name)} está a ${nf.format(Math.round(dist))} km: también puedes ir en tren, autobús o coche.`}
+          ${sameCountry ? `🏠 Estás viajando dentro de ${esc(name)}.` : sameAirport ? `🚗 ${esc(name)} no tiene aeropuerto propio cercano: se llega por carretera desde ${esc(o.label)}.` : `🚆 ${esc(name)} está a ${nf.format(Math.round(groundDist))} km: también puedes ir en tren, autobús o coche.`}
           <div class="extra-links">
             <a class="btn" href="${lk.drive}" target="_blank" rel="noopener">🚗 Ruta en coche (Google Maps)</a>
             <a class="btn" href="${lk.rome2rio}" target="_blank" rel="noopener">🚆 Tren y bus (Rome2rio)</a>
@@ -740,6 +879,7 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     }
     el.innerHTML = html;
 
+    $$("[data-dep-ap]", el).forEach((b) => b.addEventListener("click", () => setDepartureAirport(b.dataset.depAp)));
     const dep = $("#date-dep"), ret = $("#date-ret");
     if (dep) {
       dep.addEventListener("change", () => {
@@ -752,10 +892,29 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     if (state.countryFacts) renderTzDiff(state.countryFacts);
   }
 
+  // Desde qué aeropuerto se sale y alternativas cercanas (p. ej. Girona o Reus si estás cerca de Barcelona)
+  function departureNote(o) {
+    const fromYou = o.source === "gps" || o.source === "ip";
+    const alts = (o.nearby || []).filter((a) => a.iata !== o.iata).slice(0, 3);
+    if (!fromYou && !alts.length) return "";
+    const where = fromYou ? `Estás en <b>${esc(o.name)}</b>${o.source === "ip" ? " (ubicación aproximada)" : ""}. ` : "";
+    const ap = o.apName ? `Sales desde <b>${esc(o.apName)}</b> (${esc(o.iata)})${o.apDist > 3 ? `, a ${nf.format(Math.round(o.apDist))} km` : ""}.` : "";
+    const chips = alts.length
+      ? `<div class="alt-aps">Otros aeropuertos cerca: ${alts.map((a) => `<button type="button" class="alt-ap" data-dep-ap="${a.iata}" title="${esc(a.name)}">${esc(a.iata)} · ${esc(a.city || a.name)} <small>${nf.format(Math.round(a.dist))} km</small></button>`).join("")}</div>`
+      : "";
+    return `<div class="dep-note">📍 ${where}${ap}${chips}</div>`;
+  }
+
+  function originOffset() {
+    const o = state.origin;
+    const off = o.tz ? tzOffsetMinutes(o.tz) : null;
+    return off !== null ? off : Math.round((o.lng || 0) / 15) * 60; // aproximación por longitud
+  }
+
   function renderTzDiff(facts) {
     const el = $("#tz-diff");
     if (!el || !facts || !facts.timezones || !state.origin) return;
-    const oOff = tzOffsetMinutes(state.origin.tz);
+    const oOff = originOffset();
     const offs = facts.timezones.map(parseUtc).filter((x) => x !== null);
     if (oOff === null || !offs.length) return;
     const min = Math.min(...offs), max = Math.max(...offs);
@@ -1018,14 +1177,15 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     $("#origin-btn").addEventListener("click", openOriginModal);
     $("#origin-modal").addEventListener("click", (e) => {
       if (e.target.id === "origin-modal" || e.target.closest("[data-close]")) closeOriginModal();
-      const li = e.target.closest("li[data-iata]");
-      if (li) {
-        setOrigin(ORIGINS.find((o) => o.iata === li.dataset.iata));
-        closeOriginModal();
-      }
+      const li = e.target.closest("li[data-pop],li[data-ap],li[data-alt]");
+      if (!li) return;
+      if (li.dataset.pop) setOrigin(originFromCity(ORIGINS.find((o) => o.iata === li.dataset.pop)));
+      else if (li.dataset.ap) setOrigin(originFromAirport(WORLD_AP.find((a) => a.iata === li.dataset.ap)));
+      else setDepartureAirport(li.dataset.alt);
+      closeOriginModal();
     });
     $("#origin-search").addEventListener("input", (e) => renderOriginList(e.target.value));
-    $("#geo-btn").addEventListener("click", () => detectLocation(true));
+    $("#geo-btn").addEventListener("click", () => detectLocation({ manual: true }));
 
     $("#panel-close").addEventListener("click", deselect);
     $("#panel").addEventListener("click", (e) => {
@@ -1076,19 +1236,21 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     setStyle(STYLES[style] ? style : "sat");
     resize();
 
-    // Origen: guardado → si no, Barcelona y se intenta detectar la ubicación
+    // Origen: el último usado (o Barcelona) mientras detectamos dónde está la persona
     let saved = null;
-    try { saved = JSON.parse(localStorage.getItem("mv-origin") || "null"); } catch (_) { /* ignorar */ }
-    const savedOrigin = saved && ORIGINS.find((o) => o.iata === saved.iata);
-    setOrigin(savedOrigin || ORIGINS[0], { silent: true, custom: saved && saved.custom });
+    try { saved = JSON.parse(localStorage.getItem("mv-origin2") || "null"); } catch (_) { /* ignorar */ }
+    const savedOk = saved && saved.iata && Number.isFinite(saved.lat);
+    setOrigin(savedOk ? saved : originFromCity(ORIGINS[0]), { silent: true });
     globe.pointOfView({ lat: state.origin.lat - 5, lng: state.origin.lng, altitude: 2.4 }, 0);
 
     bindEvents();
     await loadCountries();
 
-    if (!savedOrigin) {
-      toast("📍 Calculamos las rutas desde <b>Barcelona</b>. Permite la ubicación o pulsa «Desde…» para cambiarlo.", 6500);
-      detectLocation(false);
+    // Si la persona no ha elegido su ciudad a mano, detectamos su ubicación en cada visita
+    if (!savedOk || saved.source !== "manual") {
+      detectLocation().catch(() => {
+        if (!savedOk) toast("📍 Calculamos las rutas desde <b>Barcelona</b>. Pulsa «Desde…» para cambiarlo.", 6500);
+      });
     }
 
     const iso = location.hash.slice(1).toUpperCase();
