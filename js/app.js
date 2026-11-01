@@ -38,8 +38,10 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     const hh = Math.floor(h), mm = Math.round((h - hh) * 60 / 5) * 5;
     return mm === 60 ? `${hh + 1} h` : hh === 0 ? `${mm} min` : `${hh} h${mm ? " " + mm + " min" : ""}`;
   };
-  const isoDate = (d) => d.toISOString().slice(0, 10);
+  // Fechas como "AAAA-MM-DD" en hora local (toISOString usaría UTC y podría dar el día anterior)
+  const isoDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+  const parseLocalDate = (s) => { const [y, m, d] = s.split("-").map(Number); return new Date(y, m - 1, d); };
   const cleanCity = (c) => String(c).replace(/\s*\(.*?\)\s*/g, "").trim();
 
   async function fetchJSON(url, signal, timeout = 9000) {
@@ -76,7 +78,7 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     }
   }
   const parseUtc = (s) => {
-    const m = String(s).match(/UTC(?:([+-−])(\d{2}):(\d{2}))?/);
+    const m = String(s).match(/UTC(?:([+\-\u2212])(\d{2}):(\d{2}))?/);
     if (!m) return null;
     if (!m[1]) return 0;
     return (m[1] === "+" ? 1 : -1) * (parseInt(m[2], 10) * 60 + parseInt(m[3], 10));
@@ -105,9 +107,9 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     centerIso: null,
     reqId: 0,
     abort: null,
+    locGen: 0, // generación de la detección de ubicación en curso
     depart: isoDate(addDays(new Date(), 30)),
-    ret: isoDate(addDays(new Date(), 37)),
-    labelsOn: false
+    ret: isoDate(addDays(new Date(), 37))
   };
 
   // ---------------------------------------------------------------- globo
@@ -176,15 +178,13 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     globe.polygonsData(list);
   }
 
+  // Coordenadas 3D de un punto del globo (mismo sistema que usa globe.gl para el resto de capas)
+  const xyz = (lat, lng, alt) => { const c = globe.getCoords(lat, lng, alt); return [c.x, c.y, c.z]; };
+
   // Todas las fronteras en un único LineSegments (1 llamada de dibujo en vez de miles)
   function buildBorders() {
     const pos = [];
-    const R = globe.getGlobeRadius();
-    const alt = 0.0015;
-    const toXYZ = ([lng, lat]) => {
-      const phi = (90 - lat) * Math.PI / 180, theta = (90 - lng) * Math.PI / 180, r = R * (1 + alt);
-      return [r * Math.sin(phi) * Math.cos(theta), r * Math.cos(phi), r * Math.sin(phi) * Math.sin(theta)];
-    };
+    const toXYZ = ([lng, lat]) => xyz(lat, lng, 0.0015);
     state.features.forEach((f) => {
       const polys = f.geometry.type === "Polygon" ? [f.geometry.coordinates] : f.geometry.coordinates;
       polys.forEach((poly) => poly.forEach((ring) => {
@@ -262,7 +262,11 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
   function setStyle(key) {
     const s = STYLES[key];
     state.style = key;
+    const changed = state.tileUrl !== s.url;
+    state.tileUrl = s.url;
     globe.globeTileEngineUrl(s.url);
+    // sin esto se siguen viendo las teselas del estilo anterior en las zonas ya visitadas
+    if (changed) globe.globeTileEngineClearCache();
     applyTileDetail(s.detail);
     if (state.borders) state.borders.visible = s.overlays;
     afterZoom(globe.pointOfView());
@@ -343,12 +347,12 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     state.countryLabels = [];
     state.features.forEach((f) => {
       const p = f.properties;
-      if (seen.has(p.iso) || p.lx == null) return;
+      if (seen.has(p.iso) || (state.byIso.get(p.iso) || f).properties.lx == null) return;
       seen.add(p.iso);
       const main = state.byIso.get(p.iso) || f;
       const [minX, minY, maxX, maxY] = main.bbox;
       state.countryLabels.push({
-        kind: "country", iso: p.iso, name: p.label, lat: p.ly, lng: p.lx, alt: 0.008,
+        kind: "country", iso: p.iso, name: p.label, lat: main.properties.ly, lng: main.properties.lx, alt: 0.008,
         size: Math.min(Math.abs(maxX - minX), 60) * Math.abs(maxY - minY), el: null
       });
     });
@@ -418,12 +422,8 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     state.regionsLoading = true;
     try {
       const lines = await (await fetch("data/regions.json")).json();
-      const R = globe.getGlobeRadius() * 1.0012;
       const pos = [];
-      const toXYZ = (lng, lat) => {
-        const phi = (90 - lat) * Math.PI / 180, theta = (90 - lng) * Math.PI / 180;
-        return [R * Math.sin(phi) * Math.cos(theta), R * Math.cos(phi), R * Math.sin(phi) * Math.sin(theta)];
-      };
+      const toXYZ = (lng, lat) => xyz(lat, lng, 0.0012);
       lines.forEach((l) => {
         let prev = toXYZ(l[0], l[1]);
         for (let i = 2; i < l.length; i += 2) {
@@ -542,7 +542,10 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
   async function loadWorldAirports() {
     if (!WORLD_AP) {
       const raw = await (await fetch("data/airports-world.json")).json();
-      WORLD_AP = raw.map(([iata, name, city, lat, lng, iso]) => ({ iata, name, city, lat, lng, iso }));
+      WORLD_AP = raw.map(([iata, name, city, lat, lng, iso]) => ({
+        iata, name, city, lat, lng, iso,
+        key: norm(`${city} ${name} ${iata} ${esName(iso)}`) // texto de búsqueda precalculado
+      }));
     }
     return WORLD_AP;
   }
@@ -640,6 +643,8 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     const status = $("#geo-status");
     const say = (t) => { if (manual) status.textContent = t; };
     say("Buscando tu ubicación…");
+    // Cada detección (o elección manual) invalida las anteriores: un resultado tardío nunca pisa uno más nuevo
+    const gen = ++state.locGen;
     await loadWorldAirports();
     const prev = state.origin;
     let gotGps = false;
@@ -651,6 +656,7 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
         city = g.city || city;
         iso = g.iso || iso;
       }
+      if (gen !== state.locGen || (source === "ip" && gotGps)) return;
       const o = originFromPosition({ lat: pos.lat, lng: pos.lng, city, iso, source });
       const changed = !prev || prev.iata !== o.iata || prev.name !== o.name || prev.source !== o.source;
       setOrigin(o, { silent: !manual && !changed });
@@ -665,6 +671,7 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     if (perm !== "denied" || manual) {
       try {
         const pos = await gpsLocation();
+        if (gen !== state.locGen) return;
         gotGps = true;
         await apply(pos, "gps");
         if (manual) setTimeout(closeOriginModal, 1200);
@@ -692,7 +699,7 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
         <span>${flag(o.iso)}</span><span>${esc(o.name)} <span class="muted small">· ${esc(esName(o.iso))}</span></span><span class="code">${o.iata}</span></li>`).join("");
     if (nq && WORLD_AP) {
       const seen = new Set(pop.map((o) => o.iata));
-      const aps = WORLD_AP.filter((a) => !seen.has(a.iata) && (norm(a.city).includes(nq) || norm(a.name).includes(nq) || norm(a.iata) === nq || norm(esName(a.iso)).includes(nq))).slice(0, 25);
+      const aps = WORLD_AP.filter((a) => !seen.has(a.iata) && a.key.includes(nq)).slice(0, 25);
       html += aps.map((a) => `<li data-ap="${a.iata}" class="${cur === a.iata ? "selected" : ""}">
         <span>${flag(a.iso)}</span><span>${esc(a.city || a.name)} <span class="muted small">· ${esc(a.name)}</span></span><span class="code">${a.iata}</span></li>`).join("");
     }
@@ -883,9 +890,7 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     $(target).innerHTML = list
       .map((p) => {
         const q = encodeURIComponent(`${p.name}${countryName ? ", " + countryName : ""}`);
-        const maps = Number.isFinite(p.lat)
-          ? `https://www.google.com/maps/search/?api=1&query=${q}`
-          : `https://www.google.com/maps/search/?api=1&query=${q}`;
+        const maps = `https://www.google.com/maps/search/?api=1&query=${q}`;
         return `<li class="place" data-n="${p.n}">
           ${p.img ? `<img loading="lazy" src="${esc(p.img)}" alt="">` : `<span class="num">${p.n}</span>`}
           <div>
@@ -936,7 +941,8 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     const groundDist = haversine(o.lat, o.lng, d.lat, d.lng);
     const hours = dist / 820 + 0.5;
     const sameCountry = o.iso === state.selected;
-    const sameAirport = d.iata && d.iata === o.iata;
+    // si el aeropuerto de llegada está a menos de 200 km del de salida no tiene sentido buscar vuelos
+    const sameAirport = d.iata && (d.iata === o.iata || dist < 200);
     const links = d.iata ? flightLinks(o, d, state.depart, state.ret) : null;
     const name = state.byIso.get(state.selected)?.properties.label || esName(state.selected);
     const [stopsShort, stopsLong] = dist > 9500 ? ["1+ escala", "lo habitual es hacer escala"] : dist > 6500 ? ["0-1 escalas", "directo o con 1 escala"] : ["Directo", "suele haber vuelos directos"];
@@ -979,7 +985,7 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
       const lk = links || flightLinks(o, { iata: o.iata, city: d.city }, state.depart, state.ret);
       html += `
         <div class="ground">
-          ${sameCountry ? `🏠 Estás viajando dentro de ${esc(name)}.` : sameAirport ? `🚗 ${esc(name)} no tiene aeropuerto propio cercano: se llega por carretera desde ${esc(o.label)}.` : `🚆 ${esc(name)} está a ${nf.format(Math.round(groundDist))} km: también puedes ir en tren, autobús o coche.`}
+          ${sameCountry ? `🏠 Estás viajando dentro de ${esc(name)}.` : sameAirport ? `🚗 ${esc(name)} está a ${nf.format(Math.round(groundDist))} km de ${esc(o.label)}: lo más práctico es ir por carretera o en tren.` : `🚆 ${esc(name)} está a ${nf.format(Math.round(groundDist))} km: también puedes ir en tren, autobús o coche.`}
           <div class="extra-links">
             <a class="btn" href="${lk.drive}" target="_blank" rel="noopener">🚗 Ruta en coche (Google Maps)</a>
             <a class="btn" href="${lk.rome2rio}" target="_blank" rel="noopener">🚆 Tren y bus (Rome2rio)</a>
@@ -994,7 +1000,7 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     if (dep) {
       dep.addEventListener("change", () => {
         state.depart = dep.value;
-        if (state.ret <= state.depart) state.ret = isoDate(addDays(new Date(state.depart), 7));
+        if (state.ret <= state.depart) state.ret = isoDate(addDays(parseLocalDate(state.depart), 7));
         renderRoute();
       });
       ret.addEventListener("change", () => { state.ret = ret.value; renderRoute(); });
@@ -1291,6 +1297,7 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
       if (e.target.id === "origin-modal" || e.target.closest("[data-close]")) closeOriginModal();
       const li = e.target.closest("li[data-pop],li[data-ap],li[data-alt]");
       if (!li) return;
+      state.locGen++; // una elección manual cancela cualquier detección en curso
       if (li.dataset.pop) setOrigin(originFromCity(ORIGINS.find((o) => o.iata === li.dataset.pop)));
       else if (li.dataset.ap) setOrigin(originFromAirport(WORLD_AP.find((a) => a.iata === li.dataset.ap)));
       else setDepartureAirport(li.dataset.alt);
@@ -1323,6 +1330,7 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         if (!$("#origin-modal").hidden) closeOriginModal();
+        else if (document.activeElement === s) s.blur(); // sólo cierra las sugerencias, no el país abierto
         else if (state.selected) deselect();
       }
       if (e.key === "/" && document.activeElement.tagName !== "INPUT") { e.preventDefault(); s.focus(); }

@@ -193,6 +193,39 @@ await test("País sin guía escrita (Laos) usa Wikidata y Wikipedia", async () =
   return names.join(", ");
 });
 
+await test("Escape en el buscador cierra sólo las sugerencias (no el país abierto)", async () => {
+  await page.fill("#search", "ita");
+  await page.keyboard.press("Escape");
+  await wait(page, 200);
+  const open = await page.$eval("#panel", (e) => !e.hidden);
+  assert(open, "el panel del país se cerró");
+  return "panel de Laos sigue abierto";
+});
+
+await test("Destino cercano (Andorra desde Girona): sin vuelos absurdos, sólo carretera/tren", async () => {
+  await page.evaluate(() => { location.hash = "JP"; });
+  await page.waitForSelector('.alt-ap[data-dep-ap="GRO"]', { timeout: 8000 });
+  await page.click('.alt-ap[data-dep-ap="GRO"]');
+  await page.evaluate(() => { location.hash = "AD"; });
+  await page.waitForFunction(() => document.querySelector("#panel h2")?.textContent === "Andorra", null, { timeout: 8000 });
+  const r = await page.evaluate(() => ({ flights: !!document.querySelector("#route .route"), ground: document.querySelector("#route .ground")?.innerText.split("\n")[0] }));
+  assert(!r.flights, "se ofrecen vuelos GRO→BCN");
+  assert(r.ground, "no hay opciones por tierra");
+  return r.ground;
+});
+
+await test("Fechas del viaje en hora local", async () => {
+  const r = await page.evaluate(() => {
+    const d = new Date(), today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    location.hash = "JP";
+    return today;
+  });
+  await page.waitForSelector("#date-dep");
+  const min = await page.$eval("#date-dep", (e) => e.min);
+  assert(min === r, `mínimo ${min}, hoy ${r}`);
+  return "mínimo = hoy (" + min + ")";
+});
+
 await test("Modo «Mapa»: usa CARTO y oculta capas duplicadas", async () => {
   await page.click('.segmented button[data-style="map"]');
   for (let i = 0; i < 40 && !tileRequests.some((u) => u.includes("cartocdn")); i++) await wait(page, 250);
@@ -220,6 +253,22 @@ await test("Buscador de origen encuentra cualquier aeropuerto del mundo", async 
   const o = await page.evaluate(() => JSON.parse(localStorage.getItem("mv-origin2")));
   assert(o.iata === "WRO" && o.source === "manual", "origen " + o.iata);
   return first;
+});
+
+await test("Una ubicación que llega tarde no pisa la ciudad elegida a mano", async () => {
+  const c2 = await browser.newContext({ viewport: { width: 1280, height: 800 } }); // sin permiso de ubicación
+  const p2 = await c2.newPage();
+  await mockNetwork(p2);
+  await p2.route(/get\.geojs\.io/, async (r) => { await new Promise((res) => setTimeout(res, 4000)); r.fulfill({ json: { latitude: "48.85", longitude: "2.35", city: "París", country_code: "FR" } }); });
+  await p2.goto(BASE);
+  await p2.waitForSelector("#origin-btn");
+  await p2.click("#origin-btn");
+  await p2.click('#origin-list li[data-pop="MAD"]');
+  await wait(p2, 6000);
+  const name = await p2.$eval("#origin-name", (e) => e.textContent);
+  await c2.close();
+  assert(name === "Madrid", "el origen cambió a " + name);
+  return "sigue en Madrid tras llegar la ubicación por IP (París)";
 });
 
 await test("Vista móvil: panel inferior y país centrado en la zona visible", async () => {

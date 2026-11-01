@@ -67,8 +67,9 @@ y comprueba: carga del globo, rendimiento, detección de ubicación, etiquetas s
 selección por clic, buscador, rutas y enlaces de vuelos, Google Earth, modos de mapa, vista móvil y ausencia de errores.
 
 ```bash
-npm i -D playwright && npx playwright install chromium
-node tests/e2e.mjs
+npm install
+npx playwright install chromium
+npm test
 ```
 
 ## Estructura
