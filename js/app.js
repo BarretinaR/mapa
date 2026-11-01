@@ -47,13 +47,18 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
   async function fetchJSON(url, signal, timeout = 9000) {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), timeout);
-    if (signal) signal.addEventListener("abort", () => ctrl.abort(), { once: true });
+    const onAbort = () => ctrl.abort();
+    if (signal) {
+      if (signal.aborted) ctrl.abort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
     try {
       const res = await fetch(url, { signal: ctrl.signal, headers: { Accept: "application/json" } });
       if (!res.ok) throw new Error("HTTP " + res.status);
       return await res.json();
     } finally {
       clearTimeout(t);
+      if (signal) signal.removeEventListener("abort", onAbort);
     }
   }
 
@@ -233,8 +238,16 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
   window.mvGlobe = globe; // útil para depurar desde la consola
   const controls = globe.controls();
   controls.autoRotate = true;
-  controls.autoRotateSpeed = 0.35;
+  // Velocidades de movimiento (más pausadas que las de serie, para que el globo se sienta "pesado")
+  const SPEED = { rotate: 0.18, zoom: 0.35, damping: 0.06, autoRotate: 0.2, fly: 2600, flyPlace: 3000, zoomBtn: 900, home: 2200 };
+  // Si el sistema pide "reducir movimiento", sin giro automático y con transiciones cortas
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    Object.assign(SPEED, { fly: 300, flyPlace: 300, zoomBtn: 200, home: 300 });
+    controls.autoRotate = false;
+  }
+  controls.autoRotateSpeed = SPEED.autoRotate;
   controls.enableDamping = true;
+  controls.dampingFactor = SPEED.damping; // inercia más suave al soltar
   controls.minDistance = 100.4;
   controls.addEventListener("start", () => {
     controls.autoRotate = false;
@@ -254,6 +267,7 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     });
     // la capa de teselas se crea de forma asíncrona al iniciar el globo: reintentamos si aún no existe
     if (!found && tries < 20) return setTimeout(() => applyTileDetail(factor, tries + 1), 150);
+    if (!found) console.warn("Mundo Viajero: no se encontró la capa de teselas de globe.gl; se usa el detalle por defecto.");
     // fuerza a recalcular y pedir las teselas aunque la cámara esté quieta (un cambio mínimo de altitud)
     const pov = globe.pointOfView();
     globe.pointOfView({ ...pov, altitude: pov.altitude * 1.0001 }, 0);
@@ -271,7 +285,10 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     if (state.borders) state.borders.visible = s.overlays;
     afterZoom(globe.pointOfView());
     $("#attribution").innerHTML = s.attr + " · Datos: Wikipedia, Wikidata, REST Countries";
-    $$(".segmented button").forEach((b) => b.classList.toggle("active", b.dataset.style === key));
+    $$(".segmented button").forEach((b) => {
+      b.classList.toggle("active", b.dataset.style === key);
+      b.setAttribute("aria-pressed", String(b.dataset.style === key));
+    });
     try { localStorage.setItem("mv-style", key); } catch (_) { /* ignorar */ }
   }
 
@@ -282,14 +299,16 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
   function applyOffset() {
     const open = !$("#panel").hidden;
     if (!open) return globe.globeOffset([0, 0]);
+    // medimos el panel real (offsetWidth/Height no se ven afectados por la animación de entrada)
+    const panel = $("#panel");
     if (isMobile()) {
       // centramos el globo en la franja visible entre la barra superior y el panel inferior
       const h = window.innerHeight;
       const top = $(".topbar").getBoundingClientRect().bottom;
-      const bottom = h * 0.4;
+      const bottom = h - panel.offsetHeight;
       globe.globeOffset([0, (top + bottom) / 2 - h / 2]);
     }
-    else globe.globeOffset([-(Math.min(440, window.innerWidth * 0.4) + 12) / 2, 0]);
+    else globe.globeOffset([-(panel.offsetWidth + 12) / 2, 0]);
   }
   window.addEventListener("resize", resize);
 
@@ -308,25 +327,6 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
       el.style.pointerEvents = "none";
     }
     return el;
-  }
-
-  function injectPinStyles() {
-    const css = `
-      .pin-origin{transform:translate(-50%,-100%);font-size:12px;font-weight:700;color:#fff;white-space:nowrap;text-shadow:0 1px 3px #000;display:flex;flex-direction:column;align-items:center;pointer-events:none}
-      .pin-origin span{background:rgba(79,195,255,.9);color:#02121c;padding:2px 8px;border-radius:99px;margin-bottom:2px}
-      .pin-place{transform:translate(-50%,-50%);cursor:pointer;display:flex;align-items:center;gap:6px}
-      .pin-place b{width:24px;height:24px;border-radius:50%;background:#ffb547;color:#1a1205;display:grid;place-items:center;font-size:12px;box-shadow:0 0 0 3px rgba(255,181,71,.35),0 2px 8px rgba(0,0,0,.6);transition:transform .2s}
-      .pin-place i{font-style:normal;font-size:12px;color:#fff;background:rgba(10,14,26,.85);padding:3px 8px;border-radius:8px;white-space:nowrap;opacity:0;transition:opacity .2s;pointer-events:none}
-      .pin-place:hover i,.pin-place.active i{opacity:1}
-      .pin-place.active b,.pin-place:hover b{transform:scale(1.25)}
-      .pin-country{transform:translate(-50%,-50%);font-size:12.5px;font-weight:700;color:#ffe9a8;text-shadow:0 1px 3px #000,0 0 8px #000;white-space:nowrap;letter-spacing:.8px;text-transform:uppercase}
-      .pin-city{transform:translate(-4px,-50%);display:flex;align-items:center;gap:5px;font-size:12px;font-weight:500;color:#fff;text-shadow:0 1px 2px #000,0 0 6px #000;white-space:nowrap}
-      .pin-city i{width:6px;height:6px;border-radius:50%;background:#fff;box-shadow:0 0 0 1.5px rgba(0,0,0,.7);flex:none}
-      .pin-city.capital{font-weight:700}
-      .pin-city.capital i{width:8px;height:8px;background:#ffb547;border-radius:1px;transform:rotate(45deg)}`;
-    const st = document.createElement("style");
-    st.textContent = css;
-    document.head.appendChild(st);
   }
 
   function updateHtmlLayer() {
@@ -446,8 +446,9 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
 
   let zoomTimer = null;
   function onZoom(pov) {
-    controls.rotateSpeed = clamp(pov.altitude * 0.55, 0.03, 1);
-    controls.zoomSpeed = clamp(0.6 + pov.altitude * 0.3, 0.6, 1.2);
+    // más lento cuanto más cerca estamos (igual que Google Earth)
+    controls.rotateSpeed = clamp(pov.altitude * SPEED.rotate, 0.01, 0.45);
+    controls.zoomSpeed = clamp(Math.sqrt(pov.altitude) * SPEED.zoom, 0.12, 0.5);
     clearTimeout(zoomTimer);
     zoomTimer = setTimeout(() => afterZoom(pov), 120);
   }
@@ -710,7 +711,9 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     $("#geo-status").textContent = "";
     $("#origin-search").value = "";
     renderOriginList();
-    loadWorldAirports().catch(() => {});
+    loadWorldAirports()
+      .then(() => { if (!$("#origin-modal").hidden) renderOriginList($("#origin-search").value); })
+      .catch(() => {});
     if (!isMobile()) setTimeout(() => $("#origin-search").focus(), 50);
   }
   function closeOriginModal() { $("#origin-modal").hidden = true; }
@@ -748,7 +751,7 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     drawArc();
     if (fly) {
       const v = countryView(iso);
-      if (v) globe.pointOfView(v, 1600);
+      if (v) globe.pointOfView(v, SPEED.fly);
     }
     try { history.replaceState(null, "", "#" + iso); } catch (_) { /* ignorar */ }
   }
@@ -776,7 +779,8 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
   function destInfo(iso) {
     const ap = AIRPORTS[iso];
     const f = state.byIso.get(iso);
-    if (ap) return { iata: ap[0], city: ap[1], lat: ap[2], lng: ap[3] };
+    // [4],[5] opcionales: coordenadas del aeropuerto cuando está lejos del destino (entradas "vía …")
+    if (ap) return { iata: ap[0], city: ap[1], lat: ap[2], lng: ap[3], apLat: ap[4] ?? ap[2], apLng: ap[5] ?? ap[3] };
     if (f) return { iata: null, city: f.properties.label, lat: f.properties.ly, lng: f.properties.lx };
     return null;
   }
@@ -808,7 +812,7 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     state.places.forEach((x) => x.el && x.el.classList.toggle("active", x.n === n));
     $$(".place").forEach((li) => li.classList.toggle("active", Number(li.dataset.n) === n));
     if (p) {
-      globe.pointOfView({ lat: p.lat, lng: p.lng, altitude: 0.06 }, 1800);
+      globe.pointOfView({ lat: p.lat, lng: p.lng, altitude: 0.06 }, SPEED.flyPlace);
       if (fromGlobe) {
         const li = $(`.place[data-n="${n}"]`);
         if (li) li.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -937,7 +941,7 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
       return;
     }
     const apLat = o.apLat ?? o.lat, apLng = o.apLng ?? o.lng;
-    const dist = haversine(apLat, apLng, d.lat, d.lng);
+    const dist = haversine(apLat, apLng, d.apLat ?? d.lat, d.apLng ?? d.lng);
     const groundDist = haversine(o.lat, o.lng, d.lat, d.lng);
     const hours = dist / 820 + 0.5;
     const sameCountry = o.iso === state.selected;
@@ -1249,7 +1253,7 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
   function renderSearch(q) {
     const ul = $("#search-results");
     const nq = norm(q);
-    if (!nq) { ul.hidden = true; return; }
+    if (!nq) { setSearchOpen(false); return; }
     const res = state.countries
       .filter((c) => norm(c.name).includes(nq) || norm(c.alt).includes(nq) || c.iso.toLowerCase() === nq)
       .sort((a, b) => (norm(a.name).startsWith(nq) ? 0 : 1) - (norm(b.name).startsWith(nq) ? 0 : 1))
@@ -1258,10 +1262,14 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     ul.innerHTML = res.length
       ? res.map((c, i) => `<li role="option" data-iso="${c.iso}" class="${i === 0 ? "active" : ""}"><span class="flag">${flag(c.iso)}</span>${esc(c.name)}${TOURISM[c.iso] ? ' <span class="muted small">· guía completa</span>' : ""}</li>`).join("")
       : `<li class="muted">Sin resultados</li>`;
-    ul.hidden = false;
+    setSearchOpen(true);
+  }
+  function setSearchOpen(open) {
+    $("#search-results").hidden = !open;
+    $("#search").setAttribute("aria-expanded", String(open));
   }
   function pickSearch(iso) {
-    $("#search-results").hidden = true;
+    setSearchOpen(false);
     $("#search").value = "";
     $("#search").blur();
     selectCountry(iso);
@@ -1283,14 +1291,14 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
       } else if (e.key === "Enter" && items[searchIdx]) {
         pickSearch(items[searchIdx].dataset.iso);
       } else if (e.key === "Escape") {
-        $("#search-results").hidden = true;
+        setSearchOpen(false);
       }
     });
     $("#search-results").addEventListener("mousedown", (e) => {
       const li = e.target.closest("li[data-iso]");
       if (li) pickSearch(li.dataset.iso);
     });
-    s.addEventListener("blur", () => setTimeout(() => ($("#search-results").hidden = true), 150));
+    s.addEventListener("blur", () => setTimeout(() => setSearchOpen(false), 150));
 
     $("#origin-btn").addEventListener("click", openOriginModal);
     $("#origin-modal").addEventListener("click", (e) => {
@@ -1317,13 +1325,13 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
     $$(".segmented button").forEach((b) => b.addEventListener("click", () => setStyle(b.dataset.style)));
     const zoomBy = (k) => {
       const p = globe.pointOfView();
-      globe.pointOfView({ ...p, altitude: clamp(p.altitude * k, 0.004, 6) }, 500);
+      globe.pointOfView({ ...p, altitude: clamp(p.altitude * k, 0.004, 6) }, SPEED.zoomBtn);
     };
-    $("#zoom-in").addEventListener("click", () => zoomBy(0.55));
-    $("#zoom-out").addEventListener("click", () => zoomBy(1.8));
+    $("#zoom-in").addEventListener("click", () => zoomBy(0.6));
+    $("#zoom-out").addEventListener("click", () => zoomBy(1.65));
     $("#zoom-home").addEventListener("click", () => {
       const v = state.selected ? countryView(state.selected) : { lat: state.origin?.lat || 30, lng: state.origin?.lng || 0, altitude: 2.4 };
-      globe.pointOfView(v, 1200);
+      globe.pointOfView(v, SPEED.home);
     });
     $("#center-btn").addEventListener("click", () => state.centerIso && selectCountry(state.centerIso, { fly: false }));
 
@@ -1343,7 +1351,6 @@ import { BufferGeometry, Float32BufferAttribute, LineSegments, LineBasicMaterial
 
   // ---------------------------------------------------------------- inicio
   async function init() {
-    injectPinStyles();
     const btn = document.createElement("button");
     btn.id = "center-btn";
     btn.className = "chip center-btn";

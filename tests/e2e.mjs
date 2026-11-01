@@ -1,5 +1,5 @@
 // Tests de extremo a extremo de Mundo Viajero.
-// Uso:  node tests/e2e.mjs        (requiere Playwright: npm i -D playwright && npx playwright install chromium)
+// Uso:  npm install && npx playwright install chromium && npm test
 // Sirve la carpeta del proyecto en local, simula las APIs externas (Wikipedia, Wikidata, REST Countries,
 // ubicación…) para que los resultados sean reproducibles y comprueba las funciones principales.
 import http from "node:http";
@@ -16,8 +16,9 @@ const TYPES = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/ja
 // ------------------------------------------------------------ servidor estático
 const server = http.createServer((req, res) => {
   const p = path.join(ROOT, decodeURIComponent(new URL(req.url, "http://x").pathname));
-  const file = p.endsWith("/") ? path.join(p, "index.html") : p;
-  if (!file.startsWith(ROOT) || !fs.existsSync(file)) { res.writeHead(404); return res.end(); }
+  const file = p.endsWith(path.sep) ? path.join(p, "index.html") : p;
+  const inside = file === ROOT || file.startsWith(ROOT + path.sep);
+  if (!inside || !fs.existsSync(file) || !fs.statSync(file).isFile()) { res.writeHead(404); return res.end(); }
   res.writeHead(200, { "Content-Type": TYPES[path.extname(file)] || "application/octet-stream" });
   fs.createReadStream(file).pipe(res);
 });
@@ -255,6 +256,20 @@ await test("Buscador de origen encuentra cualquier aeropuerto del mundo", async 
   return first;
 });
 
+await test("Destinos «vía» calculan el vuelo hasta el aeropuerto real (Heard → Perth)", async () => {
+  await page.evaluate(() => { location.hash = "HM"; });
+  await page.waitForSelector(".route .code", { timeout: 10000 });
+  const r = await page.evaluate(() => {
+    const o = JSON.parse(localStorage.getItem("mv-origin2"));
+    const km = Number(document.querySelector(".route-mid span").textContent.replace(/[^0-9]/g, ""));
+    const rad = Math.PI / 180, [la1, lo1, la2, lo2] = [o.apLat, o.apLng, -31.94, 115.97];
+    const a = Math.sin((la2 - la1) * rad / 2) ** 2 + Math.cos(la1 * rad) * Math.cos(la2 * rad) * Math.sin((lo2 - lo1) * rad / 2) ** 2;
+    return { km, expected: Math.round(2 * 6371 * Math.asin(Math.sqrt(a))), from: o.iata };
+  });
+  assert(Math.abs(r.km - r.expected) < 5, `distancia ${r.km} km, esperado ${r.expected} km`);
+  return `${r.from} → PER: ${r.km.toLocaleString("es")} km`;
+});
+
 await test("Una ubicación que llega tarde no pisa la ciudad elegida a mano", async () => {
   const c2 = await browser.newContext({ viewport: { width: 1280, height: 800 } }); // sin permiso de ubicación
   const p2 = await c2.newPage();
@@ -276,14 +291,18 @@ await test("Vista móvil: panel inferior y país centrado en la zona visible", a
   await mockNetwork(m);
   await m.goto(BASE + "#PT");
   await m.waitForSelector("#panel:not([hidden]) h2", { timeout: 15000 });
-  await wait(m, 2500);
+  // esperamos a que termine el vuelo de cámara (SPEED.fly = 2.600 ms)
+  await m.waitForFunction(() => Math.abs(mvGlobe.pointOfView().lat - 39.7) < 1.5, null, { timeout: 15000 }).catch(() => {});
+  await wait(m, 800);
   const r = await m.evaluate(() => {
     const p = document.querySelector("#panel").getBoundingClientRect();
     const c = mvGlobe.getScreenCoords(39.5, -8.0);
-    return { panelTop: Math.round(p.top), countryY: Math.round(c.y), w: document.documentElement.scrollWidth };
+    const pan = document.querySelector("#panel");
+    return { panelTop: Math.round(p.top), countryY: Math.round(c.y), w: document.documentElement.scrollWidth, panelOverflow: pan.scrollWidth - pan.clientWidth };
   });
   await m.close();
   assert(r.w <= 390, "hay scroll horizontal");
+  assert(r.panelOverflow <= 0, `el panel tiene scroll horizontal (${r.panelOverflow}px)`);
   assert(r.countryY < r.panelTop && r.countryY > 0, `Portugal queda tapado (y=${r.countryY}, panel=${r.panelTop})`);
   return `panel desde y=${r.panelTop}px, Portugal en y=${r.countryY}px`;
 });

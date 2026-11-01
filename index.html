@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-  <div id="globe" aria-label="Globo terráqueo interactivo"></div>
+  <div id="globe" role="region" aria-label="Globo terráqueo interactivo"></div>
 
   <!-- Barra superior -->
   <header class="topbar">
@@ -22,7 +22,7 @@
     </div>
 
     <div class="search">
-      <input id="search" type="search" placeholder="Buscar país… (p. ej. Japón)" autocomplete="off" aria-label="Buscar país">
+      <input id="search" type="search" placeholder="Buscar país… (p. ej. Japón)" autocomplete="off" aria-label="Buscar país" role="combobox" aria-autocomplete="list" aria-controls="search-results" aria-expanded="false">
       <ul id="search-results" class="dropdown" role="listbox" hidden></ul>
     </div>
 
@@ -56,9 +56,9 @@
   <!-- Controles del mapa -->
   <div class="map-controls">
     <div class="segmented" role="group" aria-label="Estilo del mapa">
-      <button data-style="sat" class="active" title="Imágenes de satélite en alta resolución">Satélite</button>
-      <button data-style="map" title="Mapa de calles">Mapa</button>
-      <button data-style="classic" title="Globo clásico (sin conexión)">Clásico</button>
+      <button data-style="sat" class="active" aria-pressed="true" title="Imágenes de satélite en alta resolución">Satélite</button>
+      <button data-style="map" aria-pressed="false" title="Mapa de calles">Mapa</button>
+      <button data-style="classic" aria-pressed="false" title="Globo clásico (sin conexión)">Clásico</button>
     </div>
     <div class="zoom-btns">
       <button id="zoom-in" class="icon-btn" aria-label="Acercar">＋</button>
@@ -69,7 +69,7 @@
 
   <div id="hint" class="hint">Arrastra para girar · Rueda o pellizca para hacer zoom · Haz clic en un país</div>
   <div id="attribution" class="attribution"></div>
-  <div id="toast" class="toast" hidden></div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
   <script src="vendor/globe.gl.min.js"></script>
   <script src="js/data/airports.js"></script>
